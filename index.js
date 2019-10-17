@@ -31,7 +31,7 @@ const fb_demo = () => {
 const OAuth = (opts) => {
     return new Promise ((resolve, reject) => {
         oauth_authorization (opts).then ((code) => {
-            if (code1)
+            if (code)
                 oauth_token ({ ...opts, ...{ code: code } }).then (resolve);
             else
                 resolve ({ success: false, error: 'Unable to get auth code.' });
