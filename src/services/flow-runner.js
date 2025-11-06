@@ -1,16 +1,13 @@
-const puppeteer = require('puppeteer');
 const { URL } = require('url');
 
 const { resolveDeep, resolveTemplate } = require('../utils/template');
 const { httpRequest } = require('../utils/http');
-
-const DEFAULT_LAUNCH_ARGS = [
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',
-];
-
-const getExecutablePath = () => process.env.CHROME_EXECUTABLE_PATH || 'google-chrome-unstable';
+const {
+  getPuppeteer,
+  getLaunchArgs,
+  getExecutablePath,
+  isLambda,
+} = require('../utils/puppeteer-provider');
 
 const StepAction = {
   GOTO: 'goto',
@@ -70,17 +67,31 @@ const buildRequestOptions = (tokenConfig, context) => {
 };
 
 const launchBrowser = async (options = {}) => {
+  const puppeteer = getPuppeteer();
   const launchOptions = {
     headless: options.headless !== false,
-    args: DEFAULT_LAUNCH_ARGS,
+    args: getLaunchArgs(options),
   };
 
-  if (options.executablePath !== null) {
-    launchOptions.executablePath = options.executablePath || getExecutablePath();
+  const executablePath = await getExecutablePath(options);
+  if (executablePath) {
+    launchOptions.executablePath = executablePath;
   }
 
-  if (options.args && Array.isArray(options.args)) {
-    launchOptions.args = [...launchOptions.args, ...options.args];
+  if (options.ignoreHTTPSErrors !== undefined) {
+    launchOptions.ignoreHTTPSErrors = options.ignoreHTTPSErrors;
+  }
+
+  if (options.defaultViewport !== undefined) {
+    launchOptions.defaultViewport = options.defaultViewport;
+  }
+
+  if (options.slowMo !== undefined) {
+    launchOptions.slowMo = options.slowMo;
+  }
+
+  if (isLambda) {
+    launchOptions.headless = true;
   }
 
   return puppeteer.launch(launchOptions);

@@ -90,6 +90,14 @@ Response payload contains execution metadata, the extracted authorization code, 
 3. Restart (or call the `/health` endpoint after restart) to load the new flow.
 4. Invoke the flow using `POST /flows/:flowId/run` with the necessary credentials and parameters.
 
+## AWS Lambda Deployment
+
+- Bundle the repository (including `node_modules`) and deploy it as a Lambda function. Set the handler to `lambda.handler` and choose the Node.js 18.x (or later) runtime.
+- `chrome-aws-lambda` provides the Chromium binary used in Lambda; no extra layer is required. You may override the binary path via `CHROME_EXECUTABLE_PATH` if using a custom layer.
+- Expose the function through API Gateway/Lambda Function URLs. The Express routes remain unchanged because `@vendia/serverless-express` adapts API Gateway proxy events to the app.
+- Configure the same environment variables used in container mode (`FB_OAUTH_*`, credentials, timeouts). Increase memory (≥1024 MB) and ephemeral storage if your flow downloads assets.
+- Test by invoking the function with an API Gateway proxy event body that matches the `POST /flows/:flowId/run` payload.
+
 ## Troubleshooting
 
 - Ensure the Chromium executable is available inside your environment. Set `CHROME_EXECUTABLE_PATH` if needed.
