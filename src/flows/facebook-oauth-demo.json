@@ -1,0 +1,67 @@
+{
+  "id": "facebook-oauth-demo",
+  "name": "Facebook OAuth Onboarding Demo",
+  "description": "Demonstrates an automated onboarding flow that completes a Facebook-style OAuth consent and exchanges the authorization code for tokens.",
+  "version": "1.0.0",
+  "tags": ["oauth", "demo", "facebook"],
+  "defaults": {
+    "usernameField": "#login_form input[name=\"email\"]",
+    "passwordField": "#login_form input[name=\"pass\"]",
+    "loginButton": "#login_form #loginbutton",
+    "authorizeButton": "#platformDialogForm button[name=\"__CONFIRM__\"]",
+    "waitUntil": "networkidle2",
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    }
+  },
+  "steps": [
+    {
+      "action": "goto",
+      "url": "{{authorizationUrl}}",
+      "waitUntil": "networkidle2"
+    },
+    {
+      "action": "waitForSelector",
+      "selector": "{{usernameField}}",
+      "timeout": 15000
+    },
+    {
+      "action": "type",
+      "selector": "{{usernameField}}",
+      "value": "{{username}}",
+      "clear": true
+    },
+    {
+      "action": "type",
+      "selector": "{{passwordField}}",
+      "value": "{{password}}",
+      "clear": true
+    },
+    {
+      "action": "click",
+      "selector": "{{loginButton}}",
+      "waitForNavigation": true,
+      "waitUntil": "networkidle2"
+    },
+    {
+      "action": "click",
+      "selector": "{{authorizeButton}}",
+      "waitForNavigation": true,
+      "waitUntil": "networkidle2"
+    }
+  ],
+  "result": {
+    "type": "authorization_code",
+    "param": "code",
+    "tokenRequest": {
+      "enabled": true,
+      "method": "GET",
+      "url": "{{tokenUrl}}",
+      "query": {
+        "code": "{{authorizationCode}}"
+      },
+      "expectJson": true
+    }
+  }
+}

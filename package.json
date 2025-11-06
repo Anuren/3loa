@@ -1,9 +1,11 @@
 {
   "name": "3l-oauth",
   "version": "0.1.0",
-  "description": "",
+  "description": "Automation onboarding agent for orchestrating OAuth and web-based setup flows",
   "main": "index.js",
-  "scripts": { },
+  "scripts": {
+    "start": "node index.js"
+  },
   "author": "Gufoscuro",
   "license": "ISC",
   "dependencies": {
