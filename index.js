@@ -1,138 +1,126 @@
-const request       = require ('request');
-const puppeteer     = require ('puppeteer');
-const express       = require ('express');
-const bodyParser    = require ('body-parser');
+require('dotenv').config();
 
+const express = require('express');
+const bodyParser = require('body-parser');
 
-const PORT          = process.env.PORT || 3000;
-const app           = express ();
+const scheduler = require('./src/scheduler');
+const emailAgent = require('./src/emailAgent');
 
+const PORT = process.env.PORT || 3000;
+const app = express();
 
+app.use(bodyParser.json({ limit: '128kb' }));
+app.use(bodyParser.urlencoded({ extended: true }));
 
-
-const fb_demo = () => {
-    return new Promise ((resolve, reject) => {
-        const opts = {
-            "username": "",
-            "password": "",
-        
-            "usernameField": "#login_form input[name=\"email\"]",
-            "passwordField": "#login_form input[name=\"pass\"]",
-            "loginButton": "#login_form #loginbutton",
-            "authorizeButton": "#platformDialogForm button[name=\"__CONFIRM__\"]",
-        
-            "authorizationURL": "",
-            "tokenURL": ""
-        }
-        OAuth (opts).then (resolve);
-    })
-}
-
-const OAuth = (opts) => {
-    return new Promise ((resolve, reject) => {
-        oauth_authorization (opts).then ((code) => {
-            if (code)
-                oauth_token ({ ...opts, ...{ code: code } }).then (resolve);
-            else
-                resolve ({ success: false, error: 'Unable to get auth code.' });
-        })
-    })
-}
-
-const oauth_authorization = (opts) => {
-    return new Promise ((resolve, reject) => {
-        (async () => {
-            let code        = null;
-            const browser   = await puppeteer.launch ({executablePath: 'google-chrome-unstable',args: [
-                                                        '--no-sandbox',
-                                                        '--disable-setuid-sandbox',
-                                                        '--disable-dev-shm-usage'
-                                                        ]})
-            const page      = await browser.newPage ()
-            
-            await page.goto (opts.authorizationURL);
-            const login_field = await page.$(opts.usernameField);
-
-            if (login_field) {
-                await page.focus (opts.usernameField);
-                await page.type (opts.usernameField, opts.username);
-
-                await page.focus (opts.passwordField);
-                await page.type (opts.passwordField, opts.password);
-                
-                
-                await Promise.all ([
-                    page.waitForNavigation (),
-                    page.$eval (opts.loginButton, el => el.click ())
-                ]);
-            }
-
-            const authorize_btn = await page.$(opts.authorizeButton);
-            if (authorize_btn) {
-                await Promise.all ([
-                    page.waitForNavigation (),
-                    page.$eval (opts.authorizeButton, el => el.click ())
-                ]);
-            }
-
-            const final_url = await page.url ();
-            await browser.close ();
-            const query_string = final_url.substring (final_url.indexOf ('?'));
-
-            let url_params = new URLSearchParams (query_string);
-            code = url_params.has ('code') ? url_params.get ('code') : null;
-
-            resolve (code);
-        })()
-    })
-}
-
-const oauth_token = (opts) => {
-    return new Promise ((resolve, reject) => {
-        let result      = { success: false },
-            url         = new URL (opts.tokenURL),
-            params      = new URLSearchParams (url.search);
-
-        params.set ('code', opts.code);
-        url.search = params.toString ();
-        request ({
-            type: 'GET',
-            uri: url.href
-        }, (e, r, b) => {
-            if (e) {
-                result.error = e;
-                resolve (result);
-            } else {
-                const parsed = JSON.parse (b);
-                if (parsed.error !== undefined) {
-                    result = { ...result, ...parsed };
-                    resolve (result);
-                } else {
-                    result.success = true;
-                    result = { ...result, ...parsed };
-                    resolve (result);
-                }
-            }
-        });
-    })
-}
-
-
-
-app.use (bodyParser.json ());
-
-app.get ('/fbdemo', (req, res) => {
-    fb_demo().then ((result) => {
-        res.json (result);
-    })
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Appointment scheduler API with email agent',
+    endpoints: [
+      'GET /appointments',
+      'POST /appointments',
+      'PATCH /appointments/:id',
+      'DELETE /appointments/:id',
+      'POST /availability',
+      'POST /email/inbound',
+    ],
+  });
 });
 
-app.post ('/oauth', (req, res) => {
-    OAuth (req.body).then ((result) => {
-        res.json (result)
-    })
+app.get('/healthz', (req, res) => {
+  res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
-app.listen (PORT, () => {
-    console.log ('===> Server listening on', PORT);
+app.get('/appointments', (req, res, next) => {
+  try {
+    const result = scheduler.listAppointments(req.query);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/appointments/:id', (req, res, next) => {
+  try {
+    const appointment = scheduler.getAppointment(req.params.id);
+    res.json(appointment);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/appointments', (req, res, next) => {
+  try {
+    const appointment = scheduler.createAppointment(req.body);
+    res.status(201).json(appointment);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/appointments/:id', (req, res, next) => {
+  try {
+    const appointment = scheduler.updateAppointment(req.params.id, req.body);
+    res.json(appointment);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/appointments/:id', (req, res, next) => {
+  try {
+    scheduler.deleteAppointment(req.params.id);
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/availability', (req, res, next) => {
+  try {
+    const availability = scheduler.checkAvailability(req.body);
+    res.json(availability);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/email/inbound', async (req, res, next) => {
+  try {
+    const result = await emailAgent.handleInbound(req.body);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found', message: 'Route not found' });
+});
+
+app.use((err, req, res, next) => {
+  if (err.name === 'SyntaxError' && 'body' in err) {
+    return res.status(400).json({ error: 'invalid_json', message: err.message });
+  }
+
+  const status = err.status || 500;
+  const body = {
+    error: err.code || err.name || 'internal_error',
+  };
+
+  if (err.extra && typeof err.extra === 'object') {
+    Object.assign(body, err.extra);
+  } else if (err.message && status < 500) {
+    body.message = err.message;
+  }
+
+  if (status >= 500) {
+    console.error('Unhandled error:', err);
+    body.message = 'Please try again later';
+  }
+
+  res.status(status).json(body);
+});
+
+app.listen(PORT, () => {
+  console.log(`===> Appointment scheduler listening on ${PORT}`);
 });
