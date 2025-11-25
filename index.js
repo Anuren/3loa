@@ -1,179 +1,28 @@
+require('dotenv').config();
+
 const express = require('express');
 const bodyParser = require('body-parser');
-const { randomUUID } = require('crypto');
+
+const scheduler = require('./src/scheduler');
+const emailAgent = require('./src/emailAgent');
 
 const PORT = process.env.PORT || 3000;
 const app = express();
 
-app.use(bodyParser.json({ limit: '64kb' }));
-
-// In-memory appointment store. Replace with a database for production use.
-const appointments = new Map();
-const VALID_STATUSES = new Set(['scheduled', 'completed', 'cancelled']);
-
-const parseDate = (value) => {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-};
-
-const normalizeAttendees = (value) => {
-  if (!Array.isArray(value)) return null;
-  const unique = Array.from(
-    new Set(
-      value
-        .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
-        .filter(Boolean)
-    )
-  );
-  return unique.length ? unique : null;
-};
-
-const rangesOverlap = (startA, endA, startB, endB) =>
-  startA < endB && startB < endA;
-
-const getDayRange = (value) => {
-  const date = parseDate(value);
-  if (!date) return null;
-  const start = new Date(date);
-  start.setUTCHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setUTCDate(end.getUTCDate() + 1);
-  return { start, end };
-};
-
-const serializeAppointment = (appointment) => ({ ...appointment });
-
-const findConflicts = ({ start, end, attendees, ignoreId }) => {
-  const conflicts = [];
-  const attendeesSet = new Set(attendees);
-  for (const appt of appointments.values()) {
-    if (ignoreId && appt.id === ignoreId) continue;
-    const sharedAttendees = appt.attendees.filter((person) =>
-      attendeesSet.has(person)
-    );
-    if (!sharedAttendees.length) continue;
-    const apptStart = new Date(appt.startTime);
-    const apptEnd = new Date(appt.endTime);
-    if (rangesOverlap(start, end, apptStart, apptEnd)) {
-      conflicts.push({
-        appointmentId: appt.id,
-        attendees: sharedAttendees,
-        startTime: appt.startTime,
-        endTime: appt.endTime,
-        title: appt.title,
-      });
-    }
-  }
-  return conflicts;
-};
-
-const validateAppointmentPayload = (payload, { partial = false } = {}) => {
-  const errors = [];
-  const data = {};
-
-  if (!partial || payload.title !== undefined) {
-    if (typeof payload.title !== 'string' || !payload.title.trim()) {
-      errors.push('title must be a non-empty string');
-    } else {
-      data.title = payload.title.trim();
-    }
-  }
-
-  if (payload.description !== undefined) {
-    if (typeof payload.description !== 'string') {
-      errors.push('description must be a string');
-    } else {
-      data.description = payload.description.trim();
-    }
-  }
-
-  if (!partial || payload.startTime !== undefined) {
-    const parsed = parseDate(payload.startTime);
-    if (!parsed) {
-      errors.push('startTime must be a valid ISO-8601 date string');
-    } else {
-      data.start = parsed;
-    }
-  }
-
-  if (!partial || payload.endTime !== undefined) {
-    const parsed = parseDate(payload.endTime);
-    if (!parsed) {
-      errors.push('endTime must be a valid ISO-8601 date string');
-    } else {
-      data.end = parsed;
-    }
-  }
-
-  if (!partial || payload.attendees !== undefined) {
-    const attendees = normalizeAttendees(payload.attendees);
-    if (!attendees) {
-      errors.push('attendees must be a non-empty array of unique strings');
-    } else {
-      data.attendees = attendees;
-    }
-  }
-
-  if (payload.location !== undefined) {
-    if (typeof payload.location !== 'string') {
-      errors.push('location must be a string');
-    } else {
-      data.location = payload.location.trim();
-    }
-  }
-
-  if (payload.status !== undefined) {
-    if (!VALID_STATUSES.has(payload.status)) {
-      errors.push(
-        `status must be one of: ${Array.from(VALID_STATUSES).join(', ')}`
-      );
-    } else {
-      data.status = payload.status;
-    }
-  }
-
-  if (payload.metadata !== undefined) {
-    if (
-      typeof payload.metadata !== 'object' ||
-      Array.isArray(payload.metadata) ||
-      payload.metadata === null
-    ) {
-      errors.push('metadata must be an object');
-    } else {
-      data.metadata = payload.metadata;
-    }
-  }
-
-  if (data.start && data.end && data.start >= data.end) {
-    errors.push('startTime must be before endTime');
-  }
-
-  return { errors, data };
-};
-
-const validateAvailabilityPayload = (payload) => {
-  const errors = [];
-  const start = parseDate(payload?.startTime);
-  const end = parseDate(payload?.endTime);
-  const attendees = normalizeAttendees(payload?.attendees);
-
-  if (!start) errors.push('startTime must be provided and valid');
-  if (!end) errors.push('endTime must be provided and valid');
-  if (start && end && start >= end) {
-    errors.push('startTime must be before endTime');
-  }
-  if (!attendees) {
-    errors.push('attendees must be a non-empty array of unique strings');
-  }
-
-  return { errors, start, end, attendees };
-};
+app.use(bodyParser.json({ limit: '128kb' }));
+app.use(bodyParser.urlencoded({ extended: true }));
 
 app.get('/', (req, res) => {
   res.json({
-    message: 'Appointment scheduler API is ready',
-    endpoints: ['GET /appointments', 'POST /appointments', 'POST /availability'],
+    message: 'Appointment scheduler API with email agent',
+    endpoints: [
+      'GET /appointments',
+      'POST /appointments',
+      'PATCH /appointments/:id',
+      'DELETE /appointments/:id',
+      'POST /availability',
+      'POST /email/inbound',
+    ],
   });
 });
 
@@ -181,195 +30,67 @@ app.get('/healthz', (req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
-app.get('/appointments', (req, res) => {
-  let list = Array.from(appointments.values());
-  const { status, attendee, date, from, to } = req.query;
-
-  if (status) {
-    const requested = status
-      .split(',')
-      .map((value) => value.trim())
-      .filter((value) => VALID_STATUSES.has(value));
-    if (!requested.length) {
-      return res.status(400).json({
-        error: 'validation_error',
-        details: ['status filter must include valid statuses'],
-      });
-    }
-    list = list.filter((item) => requested.includes(item.status));
+app.get('/appointments', (req, res, next) => {
+  try {
+    const result = scheduler.listAppointments(req.query);
+    res.json(result);
+  } catch (error) {
+    next(error);
   }
-
-  if (attendee) {
-    list = list.filter((item) => item.attendees.includes(attendee));
-  }
-
-  if (date) {
-    const range = getDayRange(date);
-    if (!range) {
-      return res.status(400).json({
-        error: 'validation_error',
-        details: ['date filter must be a valid date'],
-      });
-    }
-    list = list.filter((item) => {
-      const starts = new Date(item.startTime);
-      return starts >= range.start && starts < range.end;
-    });
-  }
-
-  if (from) {
-    const startFilter = parseDate(from);
-    if (!startFilter) {
-      return res.status(400).json({
-        error: 'validation_error',
-        details: ['from filter must be a valid date'],
-      });
-    }
-    list = list.filter((item) => new Date(item.startTime) >= startFilter);
-  }
-
-  if (to) {
-    const endFilter = parseDate(to);
-    if (!endFilter) {
-      return res.status(400).json({
-        error: 'validation_error',
-        details: ['to filter must be a valid date'],
-      });
-    }
-    list = list.filter((item) => new Date(item.endTime) <= endFilter);
-  }
-
-  list.sort(
-    (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
-  );
-
-  res.json({
-    data: list.map(serializeAppointment),
-    meta: { total: list.length },
-  });
 });
 
-app.get('/appointments/:id', (req, res) => {
-  const appointment = appointments.get(req.params.id);
-  if (!appointment) {
-    return res.status(404).json({ error: 'not_found', message: 'Unknown id' });
+app.get('/appointments/:id', (req, res, next) => {
+  try {
+    const appointment = scheduler.getAppointment(req.params.id);
+    res.json(appointment);
+  } catch (error) {
+    next(error);
   }
-  res.json(serializeAppointment(appointment));
 });
 
-app.post('/appointments', (req, res) => {
-  const { errors, data } = validateAppointmentPayload(req.body || {});
-  if (errors.length) {
-    return res.status(400).json({ error: 'validation_error', details: errors });
+app.post('/appointments', (req, res, next) => {
+  try {
+    const appointment = scheduler.createAppointment(req.body);
+    res.status(201).json(appointment);
+  } catch (error) {
+    next(error);
   }
-
-  const conflicts = findConflicts({
-    start: data.start,
-    end: data.end,
-    attendees: data.attendees,
-  });
-  if (conflicts.length) {
-    return res
-      .status(409)
-      .json({ error: 'scheduling_conflict', conflicts });
-  }
-
-  const now = new Date().toISOString();
-  const appointment = {
-    id: randomUUID(),
-    title: data.title,
-    description: data.description ?? '',
-    startTime: data.start.toISOString(),
-    endTime: data.end.toISOString(),
-    attendees: data.attendees,
-    location: data.location ?? '',
-    status: 'scheduled',
-    metadata: data.metadata ?? {},
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  appointments.set(appointment.id, appointment);
-  res.status(201).json(serializeAppointment(appointment));
 });
 
-app.patch('/appointments/:id', (req, res) => {
-  const appointment = appointments.get(req.params.id);
-  if (!appointment) {
-    return res.status(404).json({ error: 'not_found', message: 'Unknown id' });
+app.patch('/appointments/:id', (req, res, next) => {
+  try {
+    const appointment = scheduler.updateAppointment(req.params.id, req.body);
+    res.json(appointment);
+  } catch (error) {
+    next(error);
   }
-  if (!req.body || !Object.keys(req.body).length) {
-    return res.status(400).json({
-      error: 'validation_error',
-      details: ['request body must include at least one field'],
-    });
-  }
-
-  const { errors, data } = validateAppointmentPayload(req.body, {
-    partial: true,
-  });
-  if (errors.length) {
-    return res.status(400).json({ error: 'validation_error', details: errors });
-  }
-
-  const startDate = data.start || new Date(appointment.startTime);
-  const endDate = data.end || new Date(appointment.endTime);
-
-  if (startDate >= endDate) {
-    return res.status(400).json({
-      error: 'validation_error',
-      details: ['startTime must be before endTime'],
-    });
-  }
-
-  const attendees = data.attendees || appointment.attendees;
-  const conflicts = findConflicts({
-    start: startDate,
-    end: endDate,
-    attendees,
-    ignoreId: appointment.id,
-  });
-  if (conflicts.length) {
-    return res
-      .status(409)
-      .json({ error: 'scheduling_conflict', conflicts });
-  }
-
-  const updated = {
-    ...appointment,
-    title: data.title ?? appointment.title,
-    description: data.description ?? appointment.description,
-    startTime: startDate.toISOString(),
-    endTime: endDate.toISOString(),
-    attendees,
-    location: data.location ?? appointment.location,
-    status: data.status ?? appointment.status,
-    metadata: data.metadata ?? appointment.metadata,
-    updatedAt: new Date().toISOString(),
-  };
-
-  appointments.set(updated.id, updated);
-  res.json(serializeAppointment(updated));
 });
 
-app.delete('/appointments/:id', (req, res) => {
-  if (!appointments.has(req.params.id)) {
-    return res.status(404).json({ error: 'not_found', message: 'Unknown id' });
+app.delete('/appointments/:id', (req, res, next) => {
+  try {
+    scheduler.deleteAppointment(req.params.id);
+    res.status(204).send();
+  } catch (error) {
+    next(error);
   }
-  appointments.delete(req.params.id);
-  res.status(204).send();
 });
 
-app.post('/availability', (req, res) => {
-  const { errors, start, end, attendees } = validateAvailabilityPayload(
-    req.body || {}
-  );
-  if (errors.length) {
-    return res.status(400).json({ error: 'validation_error', details: errors });
+app.post('/availability', (req, res, next) => {
+  try {
+    const availability = scheduler.checkAvailability(req.body);
+    res.json(availability);
+  } catch (error) {
+    next(error);
   }
+});
 
-  const conflicts = findConflicts({ start, end, attendees });
-  res.json({ available: conflicts.length === 0, conflicts });
+app.post('/email/inbound', async (req, res, next) => {
+  try {
+    const result = await emailAgent.handleInbound(req.body);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.use((req, res) => {
@@ -377,10 +98,27 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  console.error('Unexpected error', err);
-  res
-    .status(500)
-    .json({ error: 'internal_error', message: 'Please try again later' });
+  if (err.name === 'SyntaxError' && 'body' in err) {
+    return res.status(400).json({ error: 'invalid_json', message: err.message });
+  }
+
+  const status = err.status || 500;
+  const body = {
+    error: err.code || err.name || 'internal_error',
+  };
+
+  if (err.extra && typeof err.extra === 'object') {
+    Object.assign(body, err.extra);
+  } else if (err.message && status < 500) {
+    body.message = err.message;
+  }
+
+  if (status >= 500) {
+    console.error('Unhandled error:', err);
+    body.message = 'Please try again later';
+  }
+
+  res.status(status).json(body);
 });
 
 app.listen(PORT, () => {
